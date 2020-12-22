@@ -1,0 +1,106 @@
+---
+title: "Categorizing Activity Quality from Accelerometer Data"
+output: html_document
+---
+
+## Introduction 
+We wish to use accelerometer data stored in the pml-training.csv file to classify a barbell lift as being lifted in one of 5 different ways. This data has been loaded into R as the `train_data` dataframe. We will use machine learning techniques such as cross-classification to build a model and assess this model's fit on a partitioned testing set.
+
+As part of this analysis, we will utilize the `caret`, `dplyr` and `ggplot2` packages:
+
+```{r setup, cache=TRUE}
+library(caret)
+library(dplyr)
+library(ggplot2)
+train_data <- read.csv("Data/pml-training.csv",
+                       colClasses = c('classe' = 'factor'))
+```
+
+## Partitioning the training set
+We wish to train our model on 70% of the data, which allows us to use the remaining 30% to predict the goodness-of-fit for our final chosen model. The below R code performs this partition:
+```{r dataPartition, cache=TRUE}
+set.seed(300)
+inTrain <- createDataPartition(train_data$classe,
+                               p=0.7,
+                               list=FALSE)
+train <- train_data[inTrain,]
+test <- train_data[-inTrain,]
+```
+
+## Predictor selection
+As the training data contains a large number (159) of independent variables, it is unreasonable to select these manually. We filter using the following logic:
+
+* The first 6 variables are excluded, as these are not predictors.
+
+```{r predSelection0, cache=TRUE} 
+train <- train[,-(1:6)]
+```
+
+* All character variables and variables containing NA values are excluded, as these do not appear helpful for our prediction problem.
+```{r predSelection1, cache=TRUE}
+vnames <- names(sapply(train, class))
+drop_vars <- vnames[sapply(train, class) == 'character' & vnames != 'classe']
+train <- train %>% select(-c(all_of(drop_vars)))
+train <- train[ , colSums(is.na(train)) == 0]
+```
+* We identify predictor pairs with high correlation, and reduce these to just one variable. 
+```{r predSelection2, cache=TRUE}
+corrMatrix <- cor(train[,1:(length(train)-1)])
+highlyCorrelated <- findCorrelation(corrMatrix, cutoff=0.7)
+train <- train[,-highlyCorrelated]
+```
+
+## Simple modelling
+We will first attempt to use a k-means clustering model, which is far simpler than a machine learning method. This will use our predictor variables to assign each observation to one of five clusters - we will then plot these clusters against the activity types to check for any correlation:
+```{r kMeans, cache=TRUE}
+clusts <- kmeans(train[,1:(length(train)-1)], 5)
+
+ggplot(data=data.frame(AssignedCluster = clusts$cluster,
+                       ActivityType = train$classe),
+       aes(x = AssignedCluster, fill = ActivityType)) +
+    geom_bar(position = position_dodge(preserve = 'single'))
+ggplot(data=data.frame(AssignedCluster = as.factor(clusts$cluster),
+                       ActivityType = train$classe),
+       aes(x = ActivityType, fill = AssignedCluster)) +
+    geom_bar(position = position_dodge(preserve = 'single'))
+```
+
+There doesn't seem to be much agreement between our clusters and the activity type, and so simple models do not seem sufficient for this problem. Instead we will consider machine learning algorithms.
+
+## Cross classification
+We will build our model on the training data, using cross-classification in order to minimize model variance. We will utilize the cross-validation method, with folds of `k=3`:
+```{r crossClassification, cache=TRUE}
+control <- trainControl(method="cv", number=3, verboseIter=FALSE)
+```
+
+## Model building
+We will attempt to build a classification model using two methods: gradient boosting and random forests. We have chosen these because they are both appropriate methods for classification problems. For the first of these, we will use the `gbm` method supplied by the `carat` package, and the second will use the `ranger` method - this is a more efficient variant of the usual `rf` method for building random forests.
+```{r modelBuilding, cache=TRUE}
+gbm_model <- train(y=train$classe,
+                   x=train[,1:(length(train)-1)],
+                   method='gbm',
+                   trControl = control,
+                   verbose=FALSE)
+
+rf_model <- train(y=train$classe,
+                  x=train[,1:(length(train)-1)],
+                  method='ranger',
+                  trControl = control,
+                  verbose=FALSE)   
+```
+
+## Quantifying fit quality
+
+In order to measure the quality of the fit provided by these models, we will run them on our partitioned `test` set:
+```{r modelFit, cache=TRUE}
+gbm_predict <- predict(gbm_model, newdata=test)
+rf_predict  <- predict(rf_model,  newdata=test)  
+
+confusionMatrix(gbm_predict, test$classe)$table
+confusionMatrix(rf_predict,  test$classe)$table
+```
+From this, we can see that the random forest approach provides a slighlty better fit, with an accuracy of `r confusionMatrix(rf_predict, test$classe)$overall[1]`.
+
+## Conclusion
+
+Having attempted to train two separate models, random forests and gradient boosting, we have found that the random forest model provides the best fit for our unseen test data, with an expected accuracy on new data of `r confusionMatrix(rf_predict, test$classe)$overall[1]`. We therefore recommend that this model is selected as the final model.
